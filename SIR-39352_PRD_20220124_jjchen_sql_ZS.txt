@@ -1,0 +1,349 @@
+create or replace PACKAGE BODY             RPT_MAT_RECMIS  AS
+
+  PROCEDURE PRC_MAT_RECMIS(FromDate in varchar2,ToDate in varchar2,PartNo in varchar2,vendor in varchar2,manufacture in varchar2,PrNo in varchar2,DIV IN VARCHAR2,Closing VARCHAR2,OUT_DATA out CUR_DATA)
+  is
+  BEGIN
+    DECLARE
+      beginDate VARCHAR2(20) := '1900/01/01 00:00:00';
+      endDate varchar2(20) := '2100/01/01 00:00:00';
+      L_PartNo varchar2(20);
+      L_vendor varchar2(20);
+      L_manufacture varchar2(20);
+      L_PrNo varchar2(20);
+      -------------------下面为公有变量 begin-----------------------------    
+    idVal number;                   --自动发送邮件程序对应的id
+    viewName    VARCHAR2(200);      --自动发送邮件程序对应的程序名称，用于筛选出对应的id值
+    nextSendDate VARCHAR2(70);      --自动发送邮件程序下次发送邮件的时间 一般为当前时间所对应的财务月介素时间加1天
+    ERROREXCEPTION EXCEPTION; --申明异常
+    ERRORCODE number; --异常编码
+    ERRORMSG varchar2(3000); --异常信息
+    out_return varchar2(3000);
+    TYPE T_CUR IS REF CURSOR;
+    V_CUR_TABLE T_CUR;
+-------------------下面为公有变量 end-----------------------------  
+    begin
+        viewName:='RPT_MAT_RECMIS.PRC_MAT_RECMIS';
+    --获取财务月日历表中当前所对应的财务月时间
+    --这里由于每一次预计在凌晨2点时执行，故而通过当前系统时间减一天去获取实际的财务月时间
+    --后续该份存储过程若不在凌晨跑，需修改相应的时间，否则将造成数据不全导致结果不正确的风险
+    dbms_output.put_line('正在获取有效的财务月时间,请等待.........................');
+    OPEN V_CUR_TABLE FOR
+--      select to_char(PD_BEGIN,'yyyy/mm/dd')||' 00:00:00' PD_BEGIN,to_char(PD_END,'yyyy/mm/dd')||' 23:59:59' PD_END,to_char(PD_END+1,'yyyy/mm/dd') NEXT_PD_BEGIN   from  da_clndr  where CLNDR_DATE=trunc(sysdate-1);
+     select to_char(PD_BEGIN,'yyyy/mm/dd')||' 00:00:00'  PD_BEGIN,
+    to_char((case when PD_END>trunc(sysdate) then trunc(sysdate)-1 else PD_END end ),'yyyy/mm/dd')||' 23:59:59' PD_END,
+    to_char(case when (PD_END-7)>=trunc(sysdate) then (PD_END-6) when trunc(sysdate)=(PD_END+1) then  (select PD_END-6  from  da_clndr  where CLNDR_DATE=trunc(sysdate))  else (PD_END+1) end,'yyyy/mm/dd') NEXT_PD_BEGIN
+    from  da_clndr  where CLNDR_DATE=trunc(sysdate)-7;
+   if closing ='Y' then
+       FETCH V_CUR_TABLE INTO beginDate,endDate,nextSendDate;
+          IF V_CUR_TABLE%NOTFOUND THEN
+               dbms_output.put_line('数据异常：未获取到有效的财务月时间.');
+          end if;
+        CLOSE V_CUR_TABLE;
+    end if; 
+    dbms_output.put_line('消息提示：当前对应的财务月开始时间为----'||beginDate);
+    dbms_output.put_line('消息提示：当前对应的财务月结束时间为----'||endDate);
+    DBMS_OUTPUT.PUT_LINE('消息提示：下一次财务月的开始时间为----'||NEXTSENDDATE);
+
+
+        IF FromDate IS NOT NULL THEN
+          beginDate := FromDate;
+        END IF;
+
+        IF ToDate IS NOT NULL THEN
+           endDate := ToDate;
+        END IF;
+
+            IF PartNo IS NOT NULL THEN
+           L_PartNo := PartNo;
+        END IF;
+
+            IF vendor IS NOT NULL THEN
+           L_vendor := vendor;
+        END IF;
+
+            IF manufacture IS NOT NULL THEN
+           L_manufacture := manufacture;
+        END IF;
+
+              IF PrNo IS NOT NULL THEN
+           L_PrNo := PrNo;
+        END IF;
+
+      OPEN OUT_DATA FOR
+      select 订单类型,
+      AA.PO,AA.PR,"物料编码","物料描述","单位","收货数量",币种,
+--      decode(length(gl_acc_number),31,substr(gl_acc_number,8,21),25,substr(gl_acc_number,5,21),gl_acc_number) gl_acc_number,
+      ''''||decode(length(gl_acc_number),31,substr(gl_acc_number,8,21),25,substr(gl_acc_number,5,21),gl_acc_number) gl_acc_number,
+      未含税单价,未含税总价 未含税总价,含税总价, EX_RATE_PO,稅率,稅金,"SHIP TERMS",BUYER,"收货时间",DEL_DATE,payterm_code,"EXCHRATE USD"
+   , "入库单号",code 供应商代码,"制造商",批次号, 申请人 请购人,收货人,单重,po_date,pur_lead_time,"供应商",PR备注,PR采购理由
+
+  --sum(收货数量)
+      from(
+
+     select '杂项'||CASE WHEN d70.CATEGORY=2 THEN '(寄售)' else '' end 订单类型,d70.PO_NUMBER PO,case when d71.pkey_old_opc >0 then d71.description else d68.PO_REQ_NUMBER end PR,th.Vendor_Dn "送货单号"
+      ,case when d71.pkey_old_opc >0 then null else decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_1,d17.INV_PART_NUMBER),d17.INV_PART_NUMBER) end "物料编码"
+       ,decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_2,nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)),nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)) "物料描述"
+      ,d2.unit_Code "单位",d71.quan_ord 订单数量,d235.QUAN_RECD "收货数量"
+
+      ,round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税单价
+      ,d235.QUAN_RECD * round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税总价
+--      ,d71.PRICE 单价
+      ,d235.QUAN_RECD * d71.PRICE 含税总价
+
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) "单价(RMB)"
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4) "含税单价(RMB)"
+      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)) "不含税单价(RMB)"
+      ,curr_code 币种,round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7) EX_RATE_PO
+
+--     ,d235.quan_recd*round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(D71.TAX,nvl(D70.TAX,0))/100,0)),4)  AMOUNT_RMB_PO
+  --    d235.QUAN_RECD*(round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))) AMOUNT_RMB_PO
+
+
+      ,D70.SHIPPING_METHOD "SHIP TERMS"
+      , PO_USER.user_full_name BUYER,D71.DEL_DATE,payterm_code,round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7)  "EXCHRATE USD"
+      ,to_char(d235.DATE_RECD,'yyyy/mm/dd') "收货时间"
+      ,th.Reference_Number "入库单号", d23.supplier_name "供应商",' ' "制造商",d235.reference "批次号",recuser.user_full_name "收货人"
+--      ,'N' IQC, d235.quan_recd*d71.PRICE*round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7) AMOUNT_usd_PO
+      ,0 单重,'' as MType,po_date,0 pur_lead_time,d23.code
+      ,(nvl(D69.MANAGEMENT_SITE,'')||nvl(D69.CONFIRMED_CC_CODE,'')||decode(data0103.gl_acc_number,'',old103.gl_acc_number,data0103.gl_acc_number)||nvl(D69.INTERCOMPANY,'')) gl_acc_number
+       ,nvl(d71.TAX,d70.TAX) 稅率,d235.quan_recd*d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))*nvl(d71.TAX,d70.TAX)*0.01 稅金
+       ,REQUSER.USER_FULL_NAME 申请人,d68.REQ_PURPOSE PR备注,d68.REMARKS PR采购理由
+      from data0235 d235
+      inner join TRANS_HD th on d235.TRANS_HD_PTR=th.PKEY
+
+      inner join DATA0071 d71 on d235.data0071_ptr=d71.PKEY
+      inner join DATA0070 d70 on d71.PO_PTR=d70.PKEY
+      left join DATA0023 d23 on d70.supplier_pointer=d23.PKEY
+      left join data0069 d69 on d71.PR_ITEM_PTR=d69.pkey
+     left join data0103 on  d69.ACCOUNT_CODE_PTR=data0103.pkey
+      left join DATA0002 d2 on d71.purchase_unit_ptr =d2.PKEY
+      left join data0068 d68 on d69.PURCH_REQ_PTR=d68.PKEY
+    left join DATA0073 REQUSER ON d68.REQ_BY= REQUSER.PKEY
+     left join data0073 recuser on d235.user_ptr= recuser.pkey
+
+-- left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR  and mert.fy = to_number(to_char(th.CRT_DATE,'yyyy'))
+-- and mert.pd=to_number(to_char(th.CRT_DATE,'mm'))
+  -- modify by rche exch rate change from d70.date to recd date 20180804
+-- left join DA_CLNDR on to_char(d70.PO_DATE,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+  left join DA_CLNDR on to_char(d235.DATE_RECD,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+          left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR
+              and mert.fy =DA_CLNDR.FY
+              and mert.pd= DA_CLNDR.PERIOD
+
+  --    left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=D70.CURRENCY_PTR  and mert_US.fy = to_number(to_char(th.CRT_DATE,'yyyy')) and mert_US.pd=to_number(to_char(th.CRT_DATE,'mm'))
+     left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=d70.CURRENCY_PTR
+            and mert_US.fy = DA_CLNDR.FY
+            and mert_US.pd=DA_CLNDR.PERIOD
+
+       left join data0001 on d70.currency_ptr=data0001.pkey
+     left join  t72 on d71.pkey_old_opc=t72.rkey
+     left join data0103 old103 on  t72.GL_PTR=old103.PKEY_OLD_ZS
+            left join data0073 PO_USER on D70.employee_pointer=PO_USER.PKEY
+             left join   DATA0462 on D70.payterm_ptr=DATA0462.PKEY
+             left join data0017 d17  ON d69.invt_ptr = d17.pkey
+--             left join budget_code  on d69.budget_code_ptr=budget_code.pkey
+--    left join pr_form_b_head cer  on 'CER'||cer.doc_id=budget_code.budget_code
+      where  d70.TRADE_PO='N'
+      AND d235.Tran_Tp=1
+      and d235.DIV_CODE='ZS'
+      and d235.DATE_RECD between to_date(beginDate,'yyyy/MM/dd hh24:mi:ss') and to_date(endDate,'yyyy/MM/dd hh24:mi:ss')
+      --and d235.DATE_RECD BETWEEN TO_DATE('2012-07-28 00:00','YYYY-MM-DD HH24:MI') AND TO_DATE('2012-07-30 23:00 ','YYYY-MM-DD HH24:MI')
+      --AND d69.MISC_PART_NUMBER LIKE'E%'
+      and nvl(d68.PO_REQ_NUMBER,0) LIKE CONCAT(NVL(L_PrNo,''),'%')
+      and nvl(d69.MISC_PART_NUMBER,0) like CONCAT(NVL(L_PartNo,''),'%')
+      and nvl(d23.ABBR_NAME,0) like CONCAT(NVL(L_vendor,''),'%')
+
+      union all
+      select '杂项'||CASE WHEN d70.CATEGORY=2 THEN '(寄售)' else '' end||'-退货' 订单类型,d70.PO_NUMBER PO,case when d71.pkey_old_opc >0 then d71.description else d68.PO_REQ_NUMBER end PR,th.Vendor_Dn "送货单号"
+      ,case when d71.pkey_old_opc >0 then null else decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_1,d17.INV_PART_NUMBER),d17.INV_PART_NUMBER) end "物料编码"
+       ,decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_2,nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)),nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)) "物料描述"
+      ,d2.unit_Code "单位",d71.quan_ord 订单数量,d235.qty_return*(-1) "收货数量"
+
+      ,round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税单价
+      ,d235.qty_return*(-1) *round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税总价
+--      ,d71.PRICE 单价
+      ,d235.qty_return*(-1) * d71.PRICE 含税总价
+
+
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) "单价(RMB)"
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4) "含税单价(RMB)"
+     ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))  "不含税单价(RMB)"
+      ,curr_code 币种,round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7) EX_RATE_PO
+
+--  ,d235.qty_return*round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(D71.TAX,nvl(D70.TAX,0))/100,0)),4)*(-1) AMOUNT_RMB_PO
+-- d235.qty_return*(round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)))*(-1) AMOUNT_RMB_PO
+      ,D70.SHIPPING_METHOD "SHIP TERMS"
+      , PO_USER.user_full_name BUYER,D71.DEL_DATE,payterm_code,round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7)  "EXCHRATE USD"
+      ,to_char(d235.DATE_RECD,'yyyy/mm/dd') "收货时间"
+      ,th.Reference_Number "入库单号", d23.supplier_name "供应商",' ' "制造商",d235.reference "批次号",recuser.user_full_name "收货人"
+--      ,'N' IQC, d235.qty_return*d71.PRICE*round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7)*(-1) AMOUNT_usd_PO
+      ,0 单重,'' as MType,po_date,0 pur_lead_time,d23.code
+      ,(nvl(D69.MANAGEMENT_SITE,'')||nvl(D69.CONFIRMED_CC_CODE,'')||decode(data0103.gl_acc_number,'',old103.gl_acc_number,data0103.gl_acc_number)||nvl(D69.INTERCOMPANY,'')) gl_acc_number
+       ,nvl(d71.TAX,d70.TAX) 稅率,d235.qty_return*d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))*nvl(d71.TAX,d70.TAX)*0.01*(-1) 稅金
+       ,REQUSER.USER_FULL_NAME 申请人,d68.REQ_PURPOSE PR备注,d68.REMARKS PR采购理由
+      from data0235 d235
+      inner join TRANS_HD th on d235.TRANS_HD_PTR=th.PKEY
+
+      inner join DATA0071 d71 on d235.data0071_ptr=d71.PKEY
+      inner join DATA0070 d70 on d71.PO_PTR=d70.PKEY
+      left join DATA0023 d23 on d70.supplier_pointer=d23.PKEY
+      left join data0069 d69 on d71.PR_ITEM_PTR=d69.pkey
+     left join data0103 on  d69.ACCOUNT_CODE_PTR=data0103.pkey
+      left join DATA0002 d2 on d71.purchase_unit_ptr =d2.PKEY
+      left join data0068 d68 on d69.PURCH_REQ_PTR=d68.PKEY
+    left join DATA0073 REQUSER ON d68.REQ_BY= REQUSER.PKEY
+     left join data0073 recuser on d235.user_ptr= recuser.pkey
+
+-- left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR  and mert.fy = to_number(to_char(th.CRT_DATE,'yyyy'))
+-- and mert.pd=to_number(to_char(th.CRT_DATE,'mm'))
+-- modify by rche exch rate change from d70.date to recd date 20180804
+-- left join DA_CLNDR on to_char(d70.po_date,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+  left join DA_CLNDR on to_char(d235.DATE_RECD,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+         left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR
+              and mert.fy =DA_CLNDR.FY
+              and mert.pd= DA_CLNDR.PERIOD
+
+  --    left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=D70.CURRENCY_PTR  and mert_US.fy = to_number(to_char(th.CRT_DATE,'yyyy')) and mert_US.pd=to_number(to_char(th.CRT_DATE,'mm'))
+     left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=d70.CURRENCY_PTR
+            and mert_US.fy = DA_CLNDR.FY
+            and mert_US.pd=DA_CLNDR.PERIOD
+
+       left join data0001 on d70.currency_ptr=data0001.pkey
+     left join  t72 on d71.pkey_old_opc=t72.rkey
+     left join data0103 old103 on  t72.GL_PTR=old103.PKEY_OLD_ZS
+            left join data0073 PO_USER on D70.employee_pointer=PO_USER.PKEY
+             left join   DATA0462 on D70.payterm_ptr=DATA0462.PKEY
+             left join data0017 d17  ON d69.invt_ptr = d17.pkey
+--             left join budget_code  on d69.budget_code_ptr=budget_code.pkey
+--    left join pr_form_b_head cer  on 'CER'||cer.doc_id=budget_code.budget_code
+      where d70.TRADE_PO='N'
+      AND d235.Tran_Tp=3
+      and d235.DIV_CODE='ZS'
+      and d235.qty_return>0
+      and d235.DATE_RECD between to_date(beginDate,'yyyy/MM/dd hh24:mi:ss') and to_date(endDate,'yyyy/MM/dd hh24:mi:ss')
+      --and d235.DATE_RECD BETWEEN TO_DATE('2019-07-02 00:00','YYYY-MM-DD HH24:MI') AND TO_DATE('2019-07-09 23:00 ','YYYY-MM-DD HH24:MI')
+      --AND d69.MISC_PART_NUMBER LIKE'E%'
+      and nvl(d68.PO_REQ_NUMBER,0) LIKE CONCAT(NVL(L_PrNo,''),'%')
+      and nvl(d69.MISC_PART_NUMBER,0) like CONCAT(NVL(L_PartNo,''),'%')
+      and nvl(d23.ABBR_NAME,0) like CONCAT(NVL(L_vendor,''),'%')
+
+      union all --取消收货记录 20200102
+
+      select '杂项'||CASE WHEN d70.CATEGORY=2 THEN '(寄售)' else '' end||'-取消收货' 订单类型,d70.PO_NUMBER PO,case when d71.pkey_old_opc >0 then d71.description else d68.PO_REQ_NUMBER end PR,th.Vendor_Dn "送货单号"
+      ,case when d71.pkey_old_opc >0 then null else decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_1,d17.INV_PART_NUMBER),d17.INV_PART_NUMBER) end "物料编码"
+       ,decode(d68.app_id,1,decode(d68.CATEGORY,7,d69.description_2,nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)),nvl(d17.INV_PART_DESCRIPTION,d71.DESCRIPTION ||d71.DESCRIPTION2)) "物料描述"
+      ,d2.unit_Code "单位",d71.quan_ord 订单数量,d235.QUAN_RECD*(-1) "收货数量"
+
+      ,round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税单价
+      ,d235.QUAN_RECD*(-1) *round(d71.PRICE/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) 未含税总价
+--      ,d71.PRICE 单价
+      ,d235.QUAN_RECD*(-1) * d71.PRICE 含税总价
+
+
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)),4) "单价(RMB)"
+--      ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4) "含税单价(RMB)"
+     ,round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))  "不含税单价(RMB)"
+      ,curr_code 币种,round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7) EX_RATE_PO
+
+--  ,d235.QUAN_RECD*round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(D71.TAX,nvl(D70.TAX,0))/100,0)),4)*(-1) AMOUNT_RMB_PO
+-- d235.qty_return*(round(d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7),4)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0)))*(-1) AMOUNT_RMB_PO
+      ,D70.SHIPPING_METHOD "SHIP TERMS"
+      , PO_USER.user_full_name BUYER,D71.DEL_DATE,payterm_code,round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7)  "EXCHRATE USD"
+      ,to_char(d235.DATE_RECD,'yyyy/mm/dd') "收货时间"
+      ,th.Reference_Number "入库单号", d23.supplier_name "供应商",' ' "制造商",d235.reference "批次号",recuser.user_full_name "收货人"
+--      ,'N' IQC, d235.QUAN_RECD*d71.PRICE*round(1/NVL(mert_US.EXCH_RATE_USA,DATA0001.EXCH_RATE_USD),7)*(-1) AMOUNT_usd_PO
+      ,0 单重,'' as MType,po_date,0 pur_lead_time,d23.code
+      ,(nvl(D69.MANAGEMENT_SITE,'')||nvl(D69.CONFIRMED_CC_CODE,'')||decode(data0103.gl_acc_number,'',old103.gl_acc_number,data0103.gl_acc_number)||nvl(D69.INTERCOMPANY,'')) gl_acc_number
+       ,nvl(d71.TAX,d70.TAX) 稅率,d235.QUAN_RECD*d71.PRICE*round(1/NVL(mert.exch_rate_rmb,DATA0001.exch_rate_rmb),7)/(1+nvl(nvl(d71.TAX,d70.TAX)/100,0))*nvl(d71.TAX,d70.TAX)*0.01*(-1) 稅金
+       ,REQUSER.USER_FULL_NAME 申请人,d68.REQ_PURPOSE PR备注,d68.REMARKS PR采购理由
+      from data0235 d235
+      inner join TRANS_HD th on d235.TRANS_HD_PTR=th.PKEY
+
+      inner join DATA0071 d71 on d235.data0071_ptr=d71.PKEY
+      inner join DATA0070 d70 on d71.PO_PTR=d70.PKEY
+      left join DATA0023 d23 on d70.supplier_pointer=d23.PKEY
+      left join data0069 d69 on d71.PR_ITEM_PTR=d69.pkey
+     left join data0103 on  d69.ACCOUNT_CODE_PTR=data0103.pkey
+      left join DATA0002 d2 on d71.purchase_unit_ptr =d2.PKEY
+      left join data0068 d68 on d69.PURCH_REQ_PTR=d68.PKEY
+    left join DATA0073 REQUSER ON d68.REQ_BY= REQUSER.PKEY
+     left join data0073 recuser on d235.user_ptr= recuser.pkey
+
+-- left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR  and mert.fy = to_number(to_char(th.CRT_DATE,'yyyy'))
+-- and mert.pd=to_number(to_char(th.CRT_DATE,'mm'))
+-- modify by rche exch rate change from d70.date to recd date 20180804
+-- left join DA_CLNDR on to_char(d70.po_date,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+  left join DA_CLNDR on to_char(d235.DATE_RECD,'yyyy/MM/DD')=to_char(DA_CLNDR.CLNDR_DATE,'YYYY/MM/DD')
+          left join MTG_EXCH_RATE mert on mert.CURR_PTR=d70.CURRENCY_PTR
+              and mert.fy =DA_CLNDR.FY
+              and mert.pd= DA_CLNDR.PERIOD
+
+  --    left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=D70.CURRENCY_PTR  and mert_US.fy = to_number(to_char(th.CRT_DATE,'yyyy')) and mert_US.pd=to_number(to_char(th.CRT_DATE,'mm'))
+     left join MTG_EXCH_RATE mert_US on mert_US.CURR_PTR=d70.CURRENCY_PTR
+            and mert_US.fy = DA_CLNDR.FY
+            and mert_US.pd=DA_CLNDR.PERIOD
+
+       left join data0001 on d70.currency_ptr=data0001.pkey
+     left join t72 on d71.pkey_old_opc=t72.rkey
+    left join data0103 old103 on  t72.GL_PTR=old103.PKEY_OLD_ZS
+            left join data0073 PO_USER on D70.employee_pointer=PO_USER.PKEY
+             left join   DATA0462 on D70.payterm_ptr=DATA0462.PKEY
+             left join data0017 d17  ON d69.invt_ptr = d17.pkey
+--             left join budget_code  on d69.budget_code_ptr=budget_code.pkey
+--    left join pr_form_b_head cer  on 'CER'||cer.doc_id=budget_code.budget_code
+      where d70.TRADE_PO='N'
+      AND d235.Tran_Tp=2
+      and d235.DIV_CODE='ZS'
+      and d235.QUAN_RECD>0
+      and d235.DATE_RECD between to_date(beginDate,'yyyy/MM/dd hh24:mi:ss') and to_date(endDate,'yyyy/MM/dd hh24:mi:ss')
+      --and d235.DATE_RECD BETWEEN TO_DATE('2019-07-02 00:00','YYYY-MM-DD HH24:MI') AND TO_DATE('2019-07-09 23:00 ','YYYY-MM-DD HH24:MI')
+      --AND d69.MISC_PART_NUMBER LIKE'E%'
+      and nvl(d68.PO_REQ_NUMBER,0) LIKE CONCAT(NVL(L_PrNo,''),'%')
+      and nvl(d69.MISC_PART_NUMBER,0) like CONCAT(NVL(L_PartNo,''),'%')
+      and nvl(d23.ABBR_NAME,0) like CONCAT(NVL(L_vendor,''),'%')
+
+
+     )AA
+
+     order by 入库单号,物料编码;
+------------------------自动发送邮件功能始--------------------------       
+
+
+    if closing ='Y' then
+       --变更自动邮件发送程序下次开始发送的时间逻辑处理
+       --这里需要注意的是程序通过 AUTO_SEND_REPORT 表的 VIEW_NAME 字段去确定唯一值
+       --故而在程序配置时要求VIEW_NAME必须唯一，否则将导致程序发送异常，需注意
+       idVal:=0;
+       dbms_output.put_line('正在获取'||viewName||'在AUTO_SEND_REPORT表中的ID,请等待.........................');
+       OPEN V_CUR_TABLE FOR
+           select id  from AUTO_SEND_REPORT where VIEW_NAME=viewName;
+           FETCH V_CUR_TABLE INTO idVal;
+           if V_CUR_TABLE%notfound then
+                dbms_output.put_line('数据异常：未获取到'||viewName||'在AUTO_SEND_REPORT表中的ID，请检查.');
+           end if;
+       CLOSE V_CUR_TABLE;
+       if idVal>0 then
+            dbms_output.put_line('数据提示：当前获取到'||viewName||'在AUTO_SEND_REPORT表中的ID值为'||idVal);
+            --更新下次邮件发送时间
+            update AUTO_SEND_REPORT set SEND_DATE=nextSendDate,LAST_CEND_DATE=sysdate  where id=idVal;
+        end if;
+   end if;  
+    --异常信息处理
+   exception
+         when errorException then
+              errorCode := SQLCODE;
+              errorMsg := SUBSTR(SQLERRM, 1, 200);
+              out_return := 'errorCode=' || errorCode || ',errorMsg=' || errorMsg;
+              ROLLBACK;
+         when others then
+               errorCode := SQLCODE;
+               errorMsg := SUBSTR(SQLERRM, 1, 200);
+               out_return := 'errorCode=' || errorCode || ',errorMsg=' || errorMsg;
+               rollback;
+     dbms_output.put_line(out_return);
+------------------------自动发送邮件功能止--------------------------
+    end;
+  END PRC_MAT_RECMIS;
+
+
+END RPT_MAT_RECMIS;
